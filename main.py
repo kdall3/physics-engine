@@ -2,6 +2,7 @@ import pygame
 import time
 import numpy as np
 import math
+import copy
 
 pygame.init()
 
@@ -126,6 +127,23 @@ def distPointToPoly(point, poly):
     
     return min(distances)
 
+
+def getClosestPolyEdge(point, poly):
+    distances = []
+    edges = []
+    for i, _ in enumerate(poly):
+        p1 = poly[i-1]
+        p2 = poly[i]
+        
+        r = np.dot(p2-p1, point-p1) / (absVect(p2-p1))**2
+        if r > 0 and r < 1:
+            edges.append([p1, p2])
+            distances.append(math.sqrt(absVect(point-p1)**2 - (r * absVect(p2-p1))**2))
+
+    return edges[distances.index(min(distances))]
+
+
+
 class Simulation:
     def __init__(self, screen_dimensions, collision_accuracy=0.001):
         self.collision_accuracy = collision_accuracy
@@ -138,45 +156,88 @@ class Simulation:
 
     def step(self, time):
         for i, obj in enumerate(self.game_objects):
-            if 'update' in dir(obj):
-                self.game_objects[i] = obj.update(self, time)
+            if 'step' in dir(obj):
+                self.game_objects[i] = obj.step(time)
+    
+
+    def saveState(self):
+        self.last_state = []
+        for obj in self.game_objects:
+            self.last_state.append(copy.deepcopy(obj))
 
 
     def handleCollisions(self):
-        for obj in self.game_objects:
-            for target in self.game_objects:
-                if obj != target:
-                    collided_verts = getVerticesInPolygon(obj.poly, target.poly)
+        for obj_A in self.game_objects:
+            for obj_B in self.game_objects:
+                if obj_A != obj_B:
+                    collided_verts = getVerticesInPolygon(obj_A.poly, obj_B.poly)
                     if len(collided_verts) > 0:
                         collided_vert = collided_verts[0]
-                        collided_vert_index = np.where(obj.poly==collided_vert)[0][0]
+                        collided_vert_index = np.where(obj_A.poly==collided_vert)[0][0]
 
                         # Binary search algorithm
                         step_increment = 0.5
                         impact_time = 0
 
-                        obj_initial = self.last_state[obj.id]
-                        target_initial = self.last_state[target.id]
-                        obj = obj_initial
-                        target = target_initial
+                        obj_A_initial = self.last_state[obj_A.id]
+                        obj_B_initial = self.last_state[obj_B.id]
+                        obj_A = copy.deepcopy(obj_A_initial)
+                        obj_B = copy.deepcopy(obj_B_initial)
 
-                        while distPointToPoly(obj.poly[collided_vert_index], target.poly) > self.collision_accuracy: # Needs to only end when the vertex is outside of the poly
-                            print(distPointToPoly(obj.poly[collided_vert_index], target.poly))
+                        while distPointToPoly(obj_A.poly[collided_vert_index], obj_B.poly) > self.collision_accuracy or checkPointInPolygon(obj_A.poly[collided_vert_index], obj_B.poly): # Needs to only end when the vertex is outside of the poly
+                            time.sleep(0.1)
 
-                            if checkPointInPolygon(obj.poly[collided_vert_index], target.poly):
+                            if checkPointInPolygon(obj_A.poly[collided_vert_index], obj_B.poly):
+                                if impact_time == 0:
+                                    print("Cannot backtrack")
+                                    break
                                 impact_time -= step_increment
                             else:
                                 impact_time += step_increment
                             
                             step_increment = step_increment / 2
 
-                            obj = obj_initial  # weird python object referencing thing
-                            target = target_initial
+                            obj_A = copy.deepcopy(obj_A_initial)  # weird python object referencing thing
+                            obj_B = copy.deepcopy(obj_B_initial)
 
-                            obj.update(self, impact_time * self.delta_time)
-                            target.update(self, impact_time * self.delta_time)
-                            self.render()
+                            obj_A.step(impact_time * self.delta_time)
+                            obj_B.step(impact_time * self.delta_time)
+
+                        print(checkPointInPolygon(obj_A.poly[collided_vert_index], obj_B.poly))
+                        print(impact_time)
+                        print(distPointToPoly(obj_A.poly[collided_vert_index], obj_B.poly))
                         
+                        # Update the rest of the objects
+                        for other_obj in self.game_objects:
+                            if other_obj.id != obj_A.id and other_obj.id != obj_B.id:
+                                other_obj.step(impact_time)
+                        
+                        # Calculate the results of the collision
+                        p = obj_A.poly[collided_vert_index]
+
+                        w_a1 = obj_A.a_vel
+                        w_b1 = obj_B.a_vel
+                        r_ap = p - obj_A.centroid
+                        r_bp = p - obj_B.centroid
+
+                        b_edge = getClosestPolyEdge(p, obj_B.poly)
+                        m_n = -1 / (b_edge[1][1] - b_edge[0][1] / b_edge[1][0] - b_edge[0][0])
+                        n = np.array([math.sqrt(1 / (1 + m_n**2)), math.sqrt(1 / (1 + 1 / m_n**2))])
+
+                        e = (obj_A.elasticity + obj_B.elasticity)/2
+
+                        v_ab1 = obj_A.vel + np.array([-w_a1 * r_ap[1], w_a1 * r_ap[0]]) - obj_B.vel - np.array([-w_b1 * r_bp[1], w_b1 * r_bp[0]])
+                        
+                        j = (-(1+e) * np.dot(v_ab1, n)) / (1/obj_A.mass + 1/obj_B.mass + (np.cross(r_ap, n)**2) / obj_A.rot_inertia + (np.cross(r_bp, n)**2) / obj_B.rot_inertia)
+
+                        obj_A.vel = obj_A.vel + j * n / obj_A.mass
+                        obj_B.vel = obj_B.vel + j * n / obj_B.mass
+
+                        obj_A.a_vel = obj_A.a_vel + np.cross(r_ap, j * n) / obj_A.rot_inertia
+                        obj_B.a_vel = obj_B.a_vel + np.cross(r_bp, j * n) / obj_B.rot_inertia
+
+                        print(obj_A.vel)
+
 
     def update(self):
         self.delta_time = time.perf_counter() - self.t
@@ -186,8 +247,8 @@ class Simulation:
         
         self.t = time.perf_counter()
 
-        self.last_state = self.game_objects
-                
+        self.saveState()
+
 
     def render(self):
         for obj in self.game_objects:
@@ -196,14 +257,14 @@ class Simulation:
 
 
 class Polygon():
-    def __init__(self, simulation, poly, colour, mass, bounciness=0.5, vel=[0, 0], acc=[0, 0], a_vel=0, a_acc=0):
+    def __init__(self, simulation, poly, colour, mass, elasticity=1, vel=[0, 0], acc=[0, 0], a_vel=0, a_acc=0):
         self.id = len(simulation.game_objects)
         simulation.game_objects.append(self)
 
         self.poly = np.array([[float(i[0]), float(i[1])] for i in poly])
         self.colour = colour
         self.mass= mass
-        self.bounciness = bounciness
+        self.elasticity = elasticity
         self.vel = np.array([float(vel[0]), float(vel[1])])
         self.acc = np.array([float(acc[0]), float(acc[1])])
         self.a_vel = float(a_vel)
@@ -217,7 +278,7 @@ class Polygon():
         self.poly = (self.poly - self.centroid).dot(r_matrix(radians * (180/math.pi))) + self.centroid
 
 
-    def update(self, simulation, delta_time):
+    def step(self, delta_time):
         self.vel += self.acc * delta_time
         self.a_vel += self.a_acc * delta_time
 
@@ -235,8 +296,8 @@ class Polygon():
 
 simulation = Simulation((400, 400))
 
-Polygon(simulation, [[10, 170], [115, 90], [130, 115], [115, 130]], (255, 0, 0), 10, vel=[15, 0], acc=[8, 9.81], a_acc=0.01)
-Polygon(simulation, [[210, 170], [315, 90], [330, 115], [315, 130]], (0, 255, 0), 10, vel=[-40, 0], acc=[-8, 9.81], a_acc=-0.01)
+Polygon(simulation, [[10, 170], [115, 90], [130, 115], [115, 130]], (255, 0, 0), 10, vel=[100, 0], acc=[0, 0], a_acc=0)
+Polygon(simulation, [[210, 170], [315, 90], [330, 115], [315, 130]], (0, 255, 0), 10, vel=[-100, 0], acc=[0, 0], a_acc=0)
 
 # Rendering
 s_width = 1920/2
