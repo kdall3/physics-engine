@@ -1,3 +1,3 @@
 # physics-engine
 
-A simple python 2D physics engine
+A python 2D physics engine
